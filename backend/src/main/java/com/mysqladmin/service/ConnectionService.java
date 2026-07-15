@@ -18,9 +18,11 @@ public class ConnectionService {
     public Map<String, Object> connect(String sessionId, ConnectionRequest request) {
         DatabaseType type = DatabaseType.from(request.databaseType());
         String host = request.host().trim();
-        String url = type == DatabaseType.SQLSERVER
-                ? "jdbc:sqlserver://" + host + ":" + request.port() + ";databaseName=master;encrypt=true;trustServerCertificate=true;loginTimeout=5"
-                : "jdbc:mysql://" + host + ":" + request.port() + "/?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false";
+        String url = switch (type) {
+            case SQLSERVER -> "jdbc:sqlserver://" + host + ":" + request.port() + ";databaseName=master;encrypt=true;trustServerCertificate=true;loginTimeout=5";
+            case DAMENG -> "jdbc:dm://" + host + ":" + request.port();
+            case MYSQL -> "jdbc:mysql://" + host + ":" + request.port() + "/?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false";
+        };
         Profile candidate = new Profile(url, host, request.port(), request.username().trim(), request.password() == null ? "" : request.password(), type);
         try (Connection connection = create(candidate)) {
             var metadata = connection.getMetaData();
@@ -40,6 +42,12 @@ public class ConnectionService {
     public Connection openDatabase(String sessionId, String database) {
         Connection connection = open(sessionId);
         try { connection.setCatalog(database); return connection; } catch (SQLException exception) { try { connection.close(); } catch (SQLException ignored) { } throw new ApiException("切换数据库失败：" + exception.getMessage()); }
+    }
+
+    public Connection openSchema(String sessionId, String schema) {
+        Connection connection = open(sessionId);
+        try { connection.setSchema(schema); return connection; }
+        catch (SQLException exception) { try { connection.close(); } catch (SQLException ignored) { } throw new ApiException("Unable to switch schema: " + exception.getMessage()); }
     }
 
     public DatabaseType type(String sessionId) {
@@ -64,7 +72,7 @@ public class ConnectionService {
 
     private record Profile(String url, String host, int port, String username, String password, DatabaseType type) { }
 
-    public enum DatabaseType { MYSQL, SQLSERVER;
+    public enum DatabaseType { MYSQL, SQLSERVER, DAMENG;
         public static DatabaseType from(String value) { try { return value == null || value.isBlank() ? MYSQL : DatabaseType.valueOf(value.trim().toUpperCase()); } catch (IllegalArgumentException exception) { throw new ApiException("不支持的数据库类型：" + value); } }
     }
 }

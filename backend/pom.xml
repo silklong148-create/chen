@@ -22,6 +22,7 @@
         <!-- Connector/J 8.0 supports MySQL Server 5.7 and 8.x. Do not inherit Boot's 9.x driver here. -->
         <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>8.0.33</version><scope>runtime</scope></dependency>
         <dependency><groupId>com.microsoft.sqlserver</groupId><artifactId>mssql-jdbc</artifactId><version>12.8.1.jre11</version><scope>runtime</scope></dependency>
+        <dependency><groupId>com.dameng</groupId><artifactId>DmJdbcDriver8</artifactId><version>8.1.5.45</version><scope>runtime</scope></dependency>
         <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>
         <dependency><groupId>org.springdoc</groupId><artifactId>springdoc-openapi-starter-webmvc-ui</artifactId><version>2.7.0</version></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
