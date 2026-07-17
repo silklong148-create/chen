@@ -350,12 +350,24 @@ public class MysqlAdminService {
     private String standardId(String value) { if (value == null || !IDENTIFIER.matcher(value).matches()) throw new ApiException("标识符只能包含英文字母、数字、下划线或 $：" + value); return "\"" + value + "\""; }
     private String standardTable(String schema, String table) { return standardId(schema) + "." + standardId(table); }
     private List<Map<String, Object>> damengDatabases(String sessionId) {
-        String sql = "SELECT USERNAME FROM SYS.SYSUSERS WHERE ID > 0 ORDER BY USERNAME";
-        try (Connection connection = connections.open(sessionId); Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
-            List<Map<String, Object>> result = new ArrayList<>();
-            while (rs.next()) { String name = rs.getString(1); result.add(Map.of("name", name, "charset", "UTF-8", "collation", "", "system", Set.of("SYS", "SYSDBA", "SYSAUDITOR", "SYSSSO", "SYSTEM").contains(name))); }
-            return result;
-        } catch (SQLException exception) { throw sqlError(exception); }
+        String[] queries = {
+                "SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH' ORDER BY NAME",
+                "SELECT OBJECT_NAME FROM DBA_OBJECTS WHERE OBJECT_TYPE = 'SCH' ORDER BY OBJECT_NAME"
+        };
+        SQLException last = null;
+        for (String sql : queries) {
+            try (Connection connection = connections.open(sessionId); Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                while (rs.next()) {
+                    String name = rs.getString(1);
+                    result.add(Map.of("name", name, "charset", "UTF-8", "collation", "", "system", Set.of("SYS", "SYSDBA", "SYSAUDITOR", "SYSSSO", "SYSTEM").contains(name)));
+                }
+                return result;
+            } catch (SQLException exception) {
+                last = exception;
+            }
+        }
+        throw sqlError(last);
     }
     private List<Map<String, Object>> damengTables(String sessionId, String schema) {
         try (Connection connection = connections.openSchema(sessionId, schema); ResultSet rs = connection.getMetaData().getTables(null, schema, "%", new String[]{"TABLE"})) {
@@ -364,8 +376,12 @@ public class MysqlAdminService {
     }
     private void damengCreateTable(String sessionId, String schema, TableRequest request) {
         String definitions = request.columns().stream().map(this::damengColumnSql).reduce((a, b) -> a + ", " + b).orElseThrow();
+        String primaryKey = damengPrimaryKeySql(request.columns());
+        if (!primaryKey.isBlank()) definitions += ", " + primaryKey;
         execute(sessionId, "CREATE TABLE " + dmTable(schema, request.name()) + " (" + definitions + ")");
         if (request.comment() != null && !request.comment().isBlank()) execute(sessionId, "COMMENT ON TABLE " + dmTable(schema, request.name()) + " IS " + literal(request.comment()));
+        request.columns().stream().filter(column -> column.comment() != null && !column.comment().isBlank())
+                .forEach(column -> execute(sessionId, "COMMENT ON COLUMN " + dmTable(schema, request.name()) + "." + dmId(column.name()) + " IS " + literal(column.comment())));
     }
     private void damengUpdateTable(String sessionId, String schema, String table, TableUpdateRequest request) {
         String target = table;
@@ -386,7 +402,9 @@ public class MysqlAdminService {
     private Map<String, Object> damengView(String sessionId, String schema, String view) { String sql = "SELECT VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?"; try (Connection connection = connections.openSchema(sessionId, schema); PreparedStatement ps = connection.prepareStatement(sql)) { ps.setString(1, schema); ps.setString(2, view); try (ResultSet rs = ps.executeQuery()) { if (!rs.next()) throw new ApiException("View not found: " + view); return Map.of("name", view, "definition", rs.getString(1)); } } catch (SQLException exception) { throw sqlError(exception); } }
     private List<Map<String, Object>> damengIndexes(String sessionId, String schema, String table) { try (Connection connection = connections.openSchema(sessionId, schema); ResultSet rs = connection.getMetaData().getIndexInfo(null, schema, table, false, false)) { Map<String, Map<String, Object>> grouped = new LinkedHashMap<>(); while (rs.next()) { String name = rs.getString("INDEX_NAME"); if (name == null) continue; Map<String, Object> item = grouped.computeIfAbsent(name, ignored -> { Map<String, Object> value = new LinkedHashMap<>(); value.put("name", name); value.put("unique", !rsBoolean(rs, "NON_UNIQUE")); value.put("type", "BTREE"); value.put("columns", new ArrayList<String>()); return value; }); @SuppressWarnings("unchecked") List<String> columns = (List<String>) item.get("columns"); columns.add(rs.getString("COLUMN_NAME")); } return new ArrayList<>(grouped.values()); } catch (SQLException exception) { throw sqlError(exception); } }
     private void damengCreateIndex(String sessionId, String schema, String table, IndexRequest request) { String columns = request.columns().stream().map(this::dmId).reduce((a, b) -> a + ", " + b).orElseThrow(); execute(sessionId, "CREATE " + (request.unique() ? "UNIQUE " : "") + "INDEX " + dmId(request.name()) + " ON " + dmTable(schema, table) + " (" + columns + ")"); }
-    private String damengColumnSql(ColumnDefinition column) { String type = column.type().toLowerCase(); String length = column.length() == null || column.length().isBlank() ? "" : "(" + checkedLength(column.length()) + ")"; String mapped = switch (type) { case "boolean" -> "BIT"; case "json", "text", "tinytext", "mediumtext", "longtext" -> "CLOB"; case "datetime", "timestamp" -> "TIMESTAMP"; case "double" -> "DOUBLE"; case "integer" -> "INT"; default -> type.toUpperCase() + length; }; return dmId(column.name()) + " " + mapped + (column.autoIncrement() ? " IDENTITY(1,1)" : "") + (column.nullable() ? " NULL" : " NOT NULL") + (column.defaultValue() == null || column.defaultValue().isBlank() ? "" : " DEFAULT " + defaultSql(column.defaultValue())) + (column.primaryKey() ? " PRIMARY KEY" : ""); }
+    private String damengColumnSql(ColumnDefinition column) { String type = column.type().toLowerCase(); if (column.autoIncrement() && !Set.of("tinyint", "smallint", "mediumint", "int", "integer", "bigint").contains(type)) throw new ApiException("Dameng identity columns must use an integer type: " + column.name()); return dmId(column.name()) + " " + damengTypeSql(column) + (column.autoIncrement() ? " IDENTITY(1,1)" : "") + (column.autoIncrement() || !column.nullable() ? " NOT NULL" : " NULL") + (column.defaultValue() == null || column.defaultValue().isBlank() ? "" : " DEFAULT " + defaultSql(column.defaultValue())); }
+    private String damengTypeSql(ColumnDefinition column) { String type = column.type().toLowerCase(); String length = column.length() == null || column.length().isBlank() ? "" : checkedLength(column.length()); return switch (type) { case "tinyint", "smallint" -> "SMALLINT"; case "mediumint", "int", "integer" -> "INT"; case "bigint" -> "BIGINT"; case "decimal", "numeric" -> "DECIMAL(" + (length.isBlank() ? "18,2" : length) + ")"; case "float" -> "FLOAT"; case "double" -> "DOUBLE"; case "char" -> "CHAR(" + (length.isBlank() ? "255" : length) + ")"; case "varchar" -> "VARCHAR2(" + (length.isBlank() ? "255" : length) + ")"; case "json", "text", "tinytext", "mediumtext", "longtext" -> "CLOB"; case "datetime", "timestamp" -> "TIMESTAMP"; case "date" -> "DATE"; case "time" -> "TIME"; case "boolean" -> "BIT"; default -> throw new ApiException("Dameng unsupported column type: " + column.type()); }; }
+    private String damengPrimaryKeySql(List<ColumnDefinition> columns) { String keys = columns.stream().filter(ColumnDefinition::primaryKey).map(column -> dmId(column.name())).reduce((a, b) -> a + ", " + b).orElse(""); return keys.isBlank() ? "" : "PRIMARY KEY (" + keys + ")"; }
     private String damengSearchClause(List<String> columns, String target) { List<String> targets = target == null ? columns : List.of(target); return targets.stream().map(column -> "CAST(" + dmId(column) + " AS VARCHAR(4000)) LIKE ?").reduce((left, right) -> left + " OR " + right).orElseThrow(); }
     private String dmId(String value) { if (value == null || !IDENTIFIER.matcher(value).matches()) throw new ApiException("Invalid identifier: " + value); return "\"" + value + "\""; }
     private String dmTable(String schema, String table) { return dmId(schema) + "." + dmId(table); }

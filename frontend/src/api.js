@@ -1,8 +1,19 @@
+const REQUEST_TIMEOUT_MS = 25000
+
 const request = async (url, options = {}) => {
-  const response = await fetch(url, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...options })
-  const payload = await response.json().catch(() => ({ message: '服务返回了无效响应' }))
-  if (!response.ok || !payload.success) throw new Error(payload.message || '请求失败')
-  return payload.data
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...options, signal: options.signal || controller.signal })
+    const payload = await response.json().catch(() => ({ message: '服务返回了无效响应' }))
+    if (!response.ok || !payload.success) throw new Error(payload.message || '请求失败')
+    return payload.data
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('请求超时，请检查数据库地址、端口、防火墙或账号权限')
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 export const api = {

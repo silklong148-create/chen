@@ -23,12 +23,15 @@ public class ConnectionService {
         String host = request.host().trim();
         String databaseName = request.databaseName() == null || request.databaseName().isBlank()
                 ? type.defaultDatabase() : request.databaseName().trim();
+        if (type == DatabaseType.MYSQL && !databaseName.isBlank() && !IDENTIFIER.matcher(databaseName).matches()) {
+            throw new ApiException("MySQL 数据库名只支持英文、数字、下划线和 $：" + databaseName);
+        }
         String url = switch (type) {
             case SQLSERVER -> "jdbc:sqlserver://" + host + ":" + request.port() + ";databaseName=master;encrypt=true;trustServerCertificate=true;loginTimeout=5";
             case DAMENG -> "jdbc:dm://" + host + ":" + request.port();
             case POSTGRESQL -> "jdbc:postgresql://" + host + ":" + request.port() + "/" + databaseName + "?connectTimeout=5&socketTimeout=15";
             case ORACLE -> "jdbc:oracle:thin:@//" + host + ":" + request.port() + "/" + databaseName;
-            case MYSQL -> "jdbc:mysql://" + host + ":" + request.port() + "/?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false";
+            case MYSQL -> "jdbc:mysql://" + host + ":" + request.port() + "/" + databaseName + "?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false&connectTimeout=5000&socketTimeout=15000";
         };
         Profile candidate = new Profile(url, host, request.port(), request.username().trim(),
                 request.password() == null ? "" : request.password(), type, databaseName);
@@ -65,8 +68,11 @@ public class ConnectionService {
         Connection connection = open(sessionId);
         if (schema == null || !IDENTIFIER.matcher(schema).matches()) { close(connection); throw new ApiException("Schema 名称不合法：" + schema); }
         try {
-            if (type(sessionId) == DatabaseType.ORACLE) {
-                try (var statement = connection.createStatement()) { statement.execute("ALTER SESSION SET CURRENT_SCHEMA = \"" + schema + "\""); }
+            DatabaseType databaseType = type(sessionId);
+            if (databaseType == DatabaseType.ORACLE) {
+                try (var statement = connection.createStatement()) { statement.execute("ALTER SESSION SET CURRENT_SCHEMA = " + quotedIdentifier(schema)); }
+            } else if (databaseType == DatabaseType.DAMENG) {
+                try (var statement = connection.createStatement()) { statement.execute("SET SCHEMA " + quotedIdentifier(schema)); }
             } else connection.setSchema(schema);
             return connection;
         }
@@ -95,10 +101,12 @@ public class ConnectionService {
         Properties properties = new Properties();
         properties.put("user", profile.username()); properties.put("password", profile.password());
         properties.put("connectTimeout", "5000"); properties.put("socketTimeout", "15000");
+        DriverManager.setLoginTimeout(5);
         return DriverManager.getConnection(profile.url(), properties);
     }
 
     private void close(Connection connection) { try { connection.close(); } catch (SQLException ignored) { } }
+    private String quotedIdentifier(String value) { return "\"" + value.replace("\"", "\"\"") + "\""; }
 
     private record Profile(String url, String host, int port, String username, String password,
                            DatabaseType type, String databaseName) { }
