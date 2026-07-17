@@ -37,6 +37,7 @@ public class MysqlAdminService {
     public List<Map<String, Object>> databases(String sessionId) {
         if (isSqlServer(sessionId)) return sqlServerDatabases(sessionId);
         if (isDameng(sessionId)) return damengDatabases(sessionId);
+        if (isStandard(sessionId)) return standardDatabases(sessionId);
         String sql = "SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME";
         try (Connection connection = connections.open(sessionId); PreparedStatement ps = connection.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             List<Map<String, Object>> result = new ArrayList<>();
@@ -48,13 +49,14 @@ public class MysqlAdminService {
         } catch (SQLException exception) { throw sqlError(exception); }
     }
 
-    public void createDatabase(String sessionId, DatabaseRequest request) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, null, "CREATE DATABASE " + sqlId(request.name())); return; } if (isDameng(sessionId)) { execute(sessionId, "CREATE SCHEMA " + dmId(request.name())); return; } execute(sessionId, "CREATE DATABASE " + id(request.name()) + charset(request)); }
-    public void updateDatabase(String sessionId, String name, DatabaseRequest request) { if (isSqlServer(sessionId)) { sqlServerUpdateDatabase(sessionId, name, request); return; } execute(sessionId, "ALTER DATABASE " + id(name) + charset(request)); }
-    public void deleteDatabase(String sessionId, String name) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, null, "ALTER DATABASE " + sqlId(name) + " SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE " + sqlId(name)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP SCHEMA " + dmId(name) + " CASCADE"); return; } execute(sessionId, "DROP DATABASE " + id(name)); }
+    public void createDatabase(String sessionId, DatabaseRequest request) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, null, "CREATE DATABASE " + sqlId(request.name())); return; } if (isDameng(sessionId)) { execute(sessionId, "CREATE SCHEMA " + dmId(request.name())); return; } if (isStandard(sessionId)) { standardCreateSchema(sessionId, request.name()); return; } execute(sessionId, "CREATE DATABASE " + id(request.name()) + charset(request)); }
+    public void updateDatabase(String sessionId, String name, DatabaseRequest request) { if (isSqlServer(sessionId)) { sqlServerUpdateDatabase(sessionId, name, request); return; } if (isStandard(sessionId) || isDameng(sessionId)) return; execute(sessionId, "ALTER DATABASE " + id(name) + charset(request)); }
+    public void deleteDatabase(String sessionId, String name) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, null, "ALTER DATABASE " + sqlId(name) + " SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE " + sqlId(name)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP SCHEMA " + dmId(name) + " CASCADE"); return; } if (isOracle(sessionId)) { oracleDropSchemaUser(sessionId, name); return; } if (isPostgresql(sessionId)) { execute(sessionId, "DROP SCHEMA " + standardId(name) + " CASCADE"); return; } execute(sessionId, "DROP DATABASE " + id(name)); }
 
     public List<Map<String, Object>> tables(String sessionId, String database) {
         if (isSqlServer(sessionId)) return sqlServerTables(sessionId, database);
         if (isDameng(sessionId)) return damengTables(sessionId, database);
+        if (isStandard(sessionId)) return standardTables(sessionId, database);
         id(database);
         String sql = "SELECT TABLE_NAME, TABLE_COMMENT, TABLE_ROWS, ENGINE, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME";
         try (Connection connection = connections.open(sessionId); PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -74,6 +76,7 @@ public class MysqlAdminService {
     public void createTable(String sessionId, String database, TableRequest request) {
         if (isSqlServer(sessionId)) { sqlServerCreateTable(sessionId, database, request); return; }
         if (isDameng(sessionId)) { damengCreateTable(sessionId, database, request); return; }
+        if (isStandard(sessionId)) { standardCreateTable(sessionId, database, request); return; }
         String definitions = request.columns().stream().map(column -> columnSql(sessionId, column)).reduce((a, b) -> a + ", " + b).orElseThrow();
         execute(sessionId, "CREATE TABLE " + id(database) + "." + id(request.name()) + " (" + definitions + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT=" + literal(request.comment()));
     }
@@ -81,6 +84,7 @@ public class MysqlAdminService {
     public void updateTable(String sessionId, String database, String table, TableUpdateRequest request) {
         if (isSqlServer(sessionId)) { sqlServerUpdateTable(sessionId, database, table, request); return; }
         if (isDameng(sessionId)) { damengUpdateTable(sessionId, database, table, request); return; }
+        if (isStandard(sessionId)) { standardUpdateTable(sessionId, database, table, request); return; }
         String target = table;
         if (request.newName() != null && !request.newName().isBlank() && !request.newName().equals(table)) {
             execute(sessionId, "RENAME TABLE " + id(database) + "." + id(table) + " TO " + id(database) + "." + id(request.newName()));
@@ -89,14 +93,15 @@ public class MysqlAdminService {
         if (request.comment() != null) execute(sessionId, "ALTER TABLE " + id(database) + "." + id(target) + " COMMENT = " + literal(request.comment()));
     }
 
-    public void deleteTable(String sessionId, String database, String table) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "DROP TABLE " + sqlTable(table)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP TABLE " + dmTable(database, table)); return; } execute(sessionId, "DROP TABLE " + id(database) + "." + id(table)); }
-    public void addColumn(String sessionId, String database, String table, ColumnDefinition column) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "ALTER TABLE " + sqlTable(table) + " ADD " + sqlServerColumnSql(column)); return; } if (isDameng(sessionId)) { execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " ADD " + damengColumnSql(column)); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " ADD COLUMN " + columnSql(sessionId, column)); }
-    public void updateColumn(String sessionId, String database, String table, String column, ColumnDefinition definition) { if (isSqlServer(sessionId)) { sqlServerUpdateColumn(sessionId, database, table, column, definition); return; } if (isDameng(sessionId)) { if (!column.equals(definition.name())) execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " RENAME COLUMN " + dmId(column) + " TO " + dmId(definition.name())); execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " MODIFY " + damengColumnSql(definition).replace(" PRIMARY KEY", "").replace(" IDENTITY(1,1)", "")); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " CHANGE COLUMN " + id(column) + " " + columnSql(sessionId, definition)); }
-    public void dropColumn(String sessionId, String database, String table, String column) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "ALTER TABLE " + sqlTable(table) + " DROP COLUMN " + sqlId(column)); return; } if (isDameng(sessionId)) { execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " DROP COLUMN " + dmId(column)); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " DROP COLUMN " + id(column)); }
+    public void deleteTable(String sessionId, String database, String table) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "DROP TABLE " + sqlTable(table)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP TABLE " + dmTable(database, table)); return; } if (isStandard(sessionId)) { execute(sessionId, "DROP TABLE " + standardTable(database, table)); return; } execute(sessionId, "DROP TABLE " + id(database) + "." + id(table)); }
+    public void addColumn(String sessionId, String database, String table, ColumnDefinition column) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "ALTER TABLE " + sqlTable(table) + " ADD " + sqlServerColumnSql(column)); return; } if (isDameng(sessionId)) { execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " ADD " + damengColumnSql(column)); return; } if (isStandard(sessionId)) { execute(sessionId, "ALTER TABLE " + standardTable(database, table) + " ADD " + standardColumnSql(sessionId, column)); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " ADD COLUMN " + columnSql(sessionId, column)); }
+    public void updateColumn(String sessionId, String database, String table, String column, ColumnDefinition definition) { if (isSqlServer(sessionId)) { sqlServerUpdateColumn(sessionId, database, table, column, definition); return; } if (isDameng(sessionId)) { if (!column.equals(definition.name())) execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " RENAME COLUMN " + dmId(column) + " TO " + dmId(definition.name())); execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " MODIFY " + damengColumnSql(definition).replace(" PRIMARY KEY", "").replace(" IDENTITY(1,1)", "")); return; } if (isStandard(sessionId)) { standardUpdateColumn(sessionId, database, table, column, definition); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " CHANGE COLUMN " + id(column) + " " + columnSql(sessionId, definition)); }
+    public void dropColumn(String sessionId, String database, String table, String column) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "ALTER TABLE " + sqlTable(table) + " DROP COLUMN " + sqlId(column)); return; } if (isDameng(sessionId)) { execute(sessionId, "ALTER TABLE " + dmTable(database, table) + " DROP COLUMN " + dmId(column)); return; } if (isStandard(sessionId)) { execute(sessionId, "ALTER TABLE " + standardTable(database, table) + " DROP COLUMN " + standardId(column)); return; } execute(sessionId, "ALTER TABLE " + id(database) + "." + id(table) + " DROP COLUMN " + id(column)); }
 
     public List<Map<String, Object>> structure(String sessionId, String database, String table) {
         if (isSqlServer(sessionId)) return sqlServerStructure(sessionId, database, table);
         if (isDameng(sessionId)) return damengStructure(sessionId, database, table);
+        if (isStandard(sessionId)) return standardStructure(sessionId, database, table);
         String sql = "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
         try (Connection connection = connections.open(sessionId); PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, database); ps.setString(2, table);
@@ -116,6 +121,7 @@ public class MysqlAdminService {
     public List<Map<String, Object>> rows(String sessionId, String database, String table, int limit, int offset, String keyword, String filterColumn, String sortBy, String sortDirection) {
         if (isSqlServer(sessionId)) return sqlServerRows(sessionId, database, table, limit, offset, keyword, filterColumn, sortBy, sortDirection);
         if (isDameng(sessionId)) return damengRows(sessionId, database, table, limit, offset, keyword, filterColumn, sortBy, sortDirection);
+        if (isStandard(sessionId)) return standardRows(sessionId, database, table, limit, offset, keyword, filterColumn, sortBy, sortDirection);
         int safeLimit = Math.max(1, Math.min(limit, 500));
         int safeOffset = Math.max(0, offset);
         List<String> columns = queryColumns(sessionId, database, table);
@@ -152,6 +158,7 @@ public class MysqlAdminService {
     public List<Map<String, Object>> views(String sessionId, String database) {
         if (isSqlServer(sessionId)) return sqlServerViews(sessionId, database);
         if (isDameng(sessionId)) return damengViews(sessionId, database);
+        if (isStandard(sessionId)) return standardViews(sessionId, database);
         String sql = "SELECT TABLE_NAME, CHECK_OPTION, IS_UPDATABLE, DEFINER FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME";
         try (Connection connection = connections.open(sessionId); PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, database);
@@ -168,6 +175,7 @@ public class MysqlAdminService {
     public Map<String, Object> view(String sessionId, String database, String view) {
         if (isSqlServer(sessionId)) return sqlServerView(sessionId, database, view);
         if (isDameng(sessionId)) return damengView(sessionId, database, view);
+        if (isStandard(sessionId)) return standardView(sessionId, database, view);
         String sql = "SHOW CREATE VIEW " + id(database) + "." + id(view);
         try (Connection connection = connections.open(sessionId); Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
             if (!rs.next()) throw new ApiException("视图不存在：" + view);
@@ -176,19 +184,21 @@ public class MysqlAdminService {
     }
 
     public List<Map<String, Object>> viewRows(String sessionId, String database, String view, int limit) { return rows(sessionId, database, view, limit, 0); }
-    public void createView(String sessionId, String database, ViewRequest request) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "CREATE VIEW " + sqlTable(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); return; } if (isDameng(sessionId)) { executeInDatabase(sessionId, database, "CREATE VIEW " + dmId(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); return; } executeInDatabase(sessionId, database, "CREATE VIEW " + id(database) + "." + id(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); }
+    public void createView(String sessionId, String database, ViewRequest request) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "CREATE VIEW " + sqlTable(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); return; } if (isDameng(sessionId)) { executeInDatabase(sessionId, database, "CREATE VIEW " + dmId(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); return; } if (isStandard(sessionId)) { execute(sessionId, "CREATE VIEW " + standardTable(database, request.name()) + " AS " + selectSql(sessionId, request.selectSql())); return; } executeInDatabase(sessionId, database, "CREATE VIEW " + id(database) + "." + id(request.name()) + " AS " + selectSql(sessionId, request.selectSql())); }
     public void updateView(String sessionId, String database, String view, ViewRequest request) {
         if (isSqlServer(sessionId)) { sqlServerUpdateView(sessionId, database, view, request); return; }
         if (isDameng(sessionId)) { String target = request.name().equals(view) ? view : request.name(); executeInDatabase(sessionId, database, "CREATE OR REPLACE VIEW " + dmId(target) + " AS " + selectSql(sessionId, request.selectSql())); if (!target.equals(view)) execute(sessionId, "DROP VIEW " + dmTable(database, view)); return; }
+        if (isStandard(sessionId)) { String target = request.name().equals(view) ? view : request.name(); execute(sessionId, "CREATE OR REPLACE VIEW " + standardTable(database, target) + " AS " + selectSql(sessionId, request.selectSql())); if (!target.equals(view)) execute(sessionId, "DROP VIEW " + standardTable(database, view)); return; }
         String target = request.name().equals(view) ? view : request.name();
         executeInDatabase(sessionId, database, "CREATE OR REPLACE VIEW " + id(database) + "." + id(target) + " AS " + selectSql(sessionId, request.selectSql()));
         if (!target.equals(view)) execute(sessionId, "DROP VIEW " + id(database) + "." + id(view));
     }
-    public void deleteView(String sessionId, String database, String view) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "DROP VIEW " + sqlTable(view)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP VIEW " + dmTable(database, view)); return; } execute(sessionId, "DROP VIEW " + id(database) + "." + id(view)); }
+    public void deleteView(String sessionId, String database, String view) { if (isSqlServer(sessionId)) { sqlExecute(sessionId, database, "DROP VIEW " + sqlTable(view)); return; } if (isDameng(sessionId)) { execute(sessionId, "DROP VIEW " + dmTable(database, view)); return; } if (isStandard(sessionId)) { execute(sessionId, "DROP VIEW " + standardTable(database, view)); return; } execute(sessionId, "DROP VIEW " + id(database) + "." + id(view)); }
 
     public List<Map<String, Object>> indexes(String sessionId, String database, String table) {
         if (isSqlServer(sessionId)) return sqlServerIndexes(sessionId, database, table);
         if (isDameng(sessionId)) return damengIndexes(sessionId, database, table);
+        if (isStandard(sessionId)) return standardIndexes(sessionId, database, table);
         String sql = "SHOW INDEX FROM " + id(database) + "." + id(table);
         try (Connection connection = connections.open(sessionId); Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
             Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
@@ -201,22 +211,144 @@ public class MysqlAdminService {
         } catch (SQLException exception) { throw sqlError(exception); }
     }
 
-    public void createIndex(String sessionId, String database, String table, IndexRequest request) { if (isSqlServer(sessionId)) { sqlServerCreateIndex(sessionId, database, table, request); return; } if (isDameng(sessionId)) { damengCreateIndex(sessionId, database, table, request); return; } createIndexSql(sessionId, database, table, request); }
+    public void createIndex(String sessionId, String database, String table, IndexRequest request) { if (isSqlServer(sessionId)) { sqlServerCreateIndex(sessionId, database, table, request); return; } if (isDameng(sessionId)) { damengCreateIndex(sessionId, database, table, request); return; } if (isStandard(sessionId)) { standardCreateIndex(sessionId, database, table, request); return; } createIndexSql(sessionId, database, table, request); }
     public void updateIndex(String sessionId, String database, String table, String index, IndexRequest request) {
         if (isSqlServer(sessionId)) { sqlServerUpdateIndex(sessionId, database, table, index, request); return; }
         if (isDameng(sessionId)) { execute(sessionId, "DROP INDEX " + dmId(index)); damengCreateIndex(sessionId, database, table, request); return; }
+        if (isStandard(sessionId)) { standardDeleteIndex(sessionId, database, index); standardCreateIndex(sessionId, database, table, request); return; }
         if ("PRIMARY".equalsIgnoreCase(index)) throw new ApiException("主键索引不能在此修改，请通过字段结构调整");
         execute(sessionId, "DROP INDEX " + id(index) + " ON " + id(database) + "." + id(table)); createIndexSql(sessionId, database, table, request);
     }
     public void deleteIndex(String sessionId, String database, String table, String index) {
         if (isSqlServer(sessionId)) { sqlServerDeleteIndex(sessionId, database, table, index); return; }
         if (isDameng(sessionId)) { execute(sessionId, "DROP INDEX " + dmId(index)); return; }
+        if (isStandard(sessionId)) { standardDeleteIndex(sessionId, database, index); return; }
         if ("PRIMARY".equalsIgnoreCase(index)) throw new ApiException("主键索引不能在此删除，请通过字段结构调整");
         execute(sessionId, "DROP INDEX " + id(index) + " ON " + id(database) + "." + id(table));
     }
 
     private boolean isSqlServer(String sessionId) { return connections.type(sessionId) == ConnectionService.DatabaseType.SQLSERVER; }
     private boolean isDameng(String sessionId) { return connections.type(sessionId) == ConnectionService.DatabaseType.DAMENG; }
+    private boolean isPostgresql(String sessionId) { return connections.type(sessionId) == ConnectionService.DatabaseType.POSTGRESQL; }
+    private boolean isOracle(String sessionId) { return connections.type(sessionId) == ConnectionService.DatabaseType.ORACLE; }
+    private boolean isStandard(String sessionId) { return isPostgresql(sessionId) || isOracle(sessionId); }
+
+    private List<Map<String, Object>> standardDatabases(String sessionId) {
+        try (Connection connection = connections.open(sessionId); ResultSet rs = connection.getMetaData().getSchemas()) {
+            List<Map<String, Object>> result = new ArrayList<>();
+            while (rs.next()) {
+                String name = rs.getString("TABLE_SCHEM");
+                boolean system = isPostgresql(sessionId)
+                        ? name.equals("information_schema") || name.startsWith("pg_")
+                        : Set.of("SYS", "SYSTEM", "XDB", "OUTLN", "DBSNMP", "AUDSYS").contains(name.toUpperCase());
+                result.add(Map.of("name", name, "charset", isOracle(sessionId) ? "DB charset" : "UTF-8", "collation", "", "system", system));
+            }
+            return result;
+        } catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private void standardCreateSchema(String sessionId, String schema) {
+        if (isOracle(sessionId)) { oracleCreateSchemaUser(sessionId, schema); return; }
+        execute(sessionId, "CREATE SCHEMA " + standardId(schema));
+    }
+
+    private void oracleCreateSchemaUser(String sessionId, String schema) {
+        String user = standardId(schema);
+        execute(sessionId, "CREATE USER " + user + " IDENTIFIED BY \"SchemaDev2026_716\" DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP QUOTA UNLIMITED ON USERS");
+        execute(sessionId, "GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE SEQUENCE, CREATE TRIGGER, CREATE PROCEDURE TO " + user);
+    }
+
+    private void oracleDropSchemaUser(String sessionId, String schema) {
+        try (Connection connection = connections.open(sessionId);
+             Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT USER FROM dual")) {
+            if (rs.next() && rs.getString(1).equalsIgnoreCase(schema)) throw new ApiException("不能删除当前正在使用的 Oracle 管理账号：" + schema);
+        } catch (SQLException exception) { throw sqlError(exception); }
+        execute(sessionId, "DROP USER " + standardId(schema) + " CASCADE");
+    }
+
+    private List<Map<String, Object>> standardTables(String sessionId, String schema) {
+        try (Connection connection = connections.openSchema(sessionId, schema);
+             ResultSet rs = connection.getMetaData().getTables(null, schema, "%", new String[]{"TABLE"})) {
+            List<Map<String, Object>> result = new ArrayList<>();
+            while (rs.next()) { Map<String, Object> item = new LinkedHashMap<>(); item.put("name", rs.getString("TABLE_NAME")); item.put("comment", rs.getString("REMARKS")); item.put("rows", 0); item.put("engine", isOracle(sessionId) ? "Oracle" : "PostgreSQL"); item.put("type", "BASE TABLE"); result.add(item); }
+            return result;
+        } catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private void standardCreateTable(String sessionId, String schema, TableRequest request) {
+        String definitions = request.columns().stream().map(column -> standardColumnSql(sessionId, column)).reduce((a,b) -> a + ", " + b).orElseThrow();
+        execute(sessionId, "CREATE TABLE " + standardTable(schema, request.name()) + " (" + definitions + ")");
+        if (request.comment() != null && !request.comment().isBlank()) execute(sessionId, "COMMENT ON TABLE " + standardTable(schema, request.name()) + " IS " + literal(request.comment()));
+    }
+
+    private void standardUpdateTable(String sessionId, String schema, String table, TableUpdateRequest request) {
+        String target = table;
+        if (request.newName() != null && !request.newName().isBlank() && !request.newName().equals(table)) { execute(sessionId, "ALTER TABLE " + standardTable(schema, table) + " RENAME TO " + standardId(request.newName())); target = request.newName(); }
+        if (request.comment() != null) execute(sessionId, "COMMENT ON TABLE " + standardTable(schema, target) + " IS " + literal(request.comment()));
+    }
+
+    private List<Map<String, Object>> standardStructure(String sessionId, String schema, String table) {
+        try (Connection connection = connections.openSchema(sessionId, schema)) {
+            Set<String> keys = new java.util.HashSet<>();
+            try (ResultSet primary = connection.getMetaData().getPrimaryKeys(null, schema, table)) { while (primary.next()) keys.add(primary.getString("COLUMN_NAME")); }
+            try (ResultSet columns = connection.getMetaData().getColumns(null, schema, table, "%")) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                while (columns.next()) { Map<String, Object> item = new LinkedHashMap<>(); String name = columns.getString("COLUMN_NAME"); String type = columns.getString("TYPE_NAME"); int size = columns.getInt("COLUMN_SIZE"); item.put("name", name); item.put("type", type + (size > 0 && !Set.of("text", "date", "timestamp", "clob", "blob").contains(type.toLowerCase()) ? "(" + size + ")" : "")); item.put("nullable", columns.getInt("NULLABLE") == java.sql.DatabaseMetaData.columnNoNulls ? "NO" : "YES"); item.put("key", keys.contains(name) ? "PRI" : ""); item.put("defaultValue", columns.getString("COLUMN_DEF")); item.put("extra", columns.getString("IS_AUTOINCREMENT")); item.put("comment", columns.getString("REMARKS")); result.add(item); }
+                return result;
+            }
+        } catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private List<Map<String, Object>> standardRows(String sessionId, String schema, String table, int limit, int offset, String keyword, String filterColumn, String sortBy, String sortDirection) {
+        int safeLimit = Math.max(1, Math.min(limit, 500)); int safeOffset = Math.max(0, offset);
+        List<String> columns = queryColumns(sessionId, schema, table); String target = checkedQueryColumn(filterColumn, columns, false); String order = checkedQueryColumn(sortBy, columns, true);
+        String where = keyword == null || keyword.isBlank() ? "" : " WHERE " + standardSearchClause(columns, target);
+        String paging = isOracle(sessionId) ? " OFFSET " + safeOffset + " ROWS FETCH NEXT " + safeLimit + " ROWS ONLY" : " LIMIT " + safeLimit + " OFFSET " + safeOffset;
+        String sql = "SELECT * FROM " + standardTable(schema, table) + where + " ORDER BY " + standardId(order) + " " + checkedDirection(sortDirection) + paging;
+        try (Connection connection = connections.openSchema(sessionId, schema); PreparedStatement ps = connection.prepareStatement(sql)) { if (keyword != null && !keyword.isBlank()) bindSearch(ps, keyword, target == null ? columns.size() : 1); try (ResultSet rs = ps.executeQuery()) { return resultRows(rs); } }
+        catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private List<Map<String, Object>> standardViews(String sessionId, String schema) {
+        try (Connection connection = connections.openSchema(sessionId, schema); ResultSet rs = connection.getMetaData().getTables(null, schema, "%", new String[]{"VIEW"})) {
+            List<Map<String, Object>> result = new ArrayList<>(); while (rs.next()) result.add(Map.of("name", rs.getString("TABLE_NAME"), "checkOption", "NONE", "updatable", "UNKNOWN", "definer", schema)); return result;
+        } catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private Map<String, Object> standardView(String sessionId, String schema, String view) {
+        String sql = isOracle(sessionId) ? "SELECT TEXT FROM ALL_VIEWS WHERE OWNER=? AND VIEW_NAME=?" : "SELECT definition FROM pg_views WHERE schemaname=? AND viewname=?";
+        try (Connection connection = connections.openSchema(sessionId, schema); PreparedStatement ps = connection.prepareStatement(sql)) { ps.setString(1, isOracle(sessionId) ? schema.toUpperCase() : schema); ps.setString(2, isOracle(sessionId) ? view.toUpperCase() : view); try (ResultSet rs = ps.executeQuery()) { if (!rs.next()) throw new ApiException("视图不存在：" + view); return Map.of("name", view, "definition", rs.getString(1)); } }
+        catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private List<Map<String, Object>> standardIndexes(String sessionId, String schema, String table) {
+        try (Connection connection = connections.openSchema(sessionId, schema); ResultSet rs = connection.getMetaData().getIndexInfo(null, schema, table, false, false)) {
+            Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
+            while (rs.next()) { String name = rs.getString("INDEX_NAME"); String column = rs.getString("COLUMN_NAME"); if (name == null || column == null) continue; Map<String, Object> item = grouped.computeIfAbsent(name, ignored -> { Map<String,Object> value = new LinkedHashMap<>(); value.put("name", name); value.put("unique", !rsBoolean(rs, "NON_UNIQUE")); value.put("type", "BTREE"); value.put("columns", new ArrayList<String>()); return value; }); @SuppressWarnings("unchecked") List<String> values = (List<String>) item.get("columns"); values.add(column); }
+            return new ArrayList<>(grouped.values());
+        } catch (SQLException exception) { throw sqlError(exception); }
+    }
+
+    private void standardCreateIndex(String sessionId, String schema, String table, IndexRequest request) { String columns = request.columns().stream().map(this::standardId).reduce((a,b) -> a + ", " + b).orElseThrow(); String index = isOracle(sessionId) ? standardTable(schema, request.name()) : standardId(request.name()); execute(sessionId, "CREATE " + (request.unique() ? "UNIQUE " : "") + "INDEX " + index + " ON " + standardTable(schema, table) + " (" + columns + ")"); }
+    private void standardDeleteIndex(String sessionId, String schema, String index) { execute(sessionId, "DROP INDEX " + standardTable(schema, index)); }
+
+    private void standardUpdateColumn(String sessionId, String schema, String table, String column, ColumnDefinition definition) {
+        String target = column;
+        if (!column.equals(definition.name())) { execute(sessionId, "ALTER TABLE " + standardTable(schema, table) + " RENAME COLUMN " + standardId(column) + " TO " + standardId(definition.name())); target = definition.name(); }
+        if (isOracle(sessionId)) execute(sessionId, "ALTER TABLE " + standardTable(schema, table) + " MODIFY " + standardColumnSql(sessionId, definition).replace(" PRIMARY KEY", "").replace(" GENERATED BY DEFAULT AS IDENTITY", ""));
+        else { String mapped = standardType(sessionId, definition); execute(sessionId, "ALTER TABLE " + standardTable(schema, table) + " ALTER COLUMN " + standardId(target) + " TYPE " + mapped); execute(sessionId, "ALTER TABLE " + standardTable(schema, table) + " ALTER COLUMN " + standardId(target) + (definition.nullable() ? " DROP NOT NULL" : " SET NOT NULL")); }
+    }
+
+    private String standardColumnSql(String sessionId, ColumnDefinition column) { return standardId(column.name()) + " " + standardType(sessionId, column) + (column.autoIncrement() ? " GENERATED BY DEFAULT AS IDENTITY" : "") + (column.nullable() ? " NULL" : " NOT NULL") + (column.defaultValue() == null || column.defaultValue().isBlank() ? "" : " DEFAULT " + defaultSql(column.defaultValue())) + (column.primaryKey() ? " PRIMARY KEY" : ""); }
+    private String standardType(String sessionId, ColumnDefinition column) {
+        String type = column.type().toLowerCase(); String length = column.length() == null || column.length().isBlank() ? "" : checkedLength(column.length());
+        if (isPostgresql(sessionId)) return switch (type) { case "tinyint", "smallint" -> "SMALLINT"; case "mediumint", "int", "integer" -> "INTEGER"; case "bigint" -> "BIGINT"; case "decimal", "numeric" -> "NUMERIC(" + (length.isBlank() ? "18,2" : length) + ")"; case "float", "double" -> "DOUBLE PRECISION"; case "char", "varchar" -> type.toUpperCase() + "(" + (length.isBlank() ? "255" : length) + ")"; case "text", "tinytext", "mediumtext", "longtext" -> "TEXT"; case "datetime", "timestamp" -> "TIMESTAMP"; case "date" -> "DATE"; case "time" -> "TIME"; case "boolean" -> "BOOLEAN"; case "json" -> "JSONB"; default -> throw new ApiException("PostgreSQL 不支持字段类型：" + column.type()); };
+        return switch (type) { case "tinyint", "smallint", "mediumint", "int", "integer", "bigint" -> "NUMBER"; case "decimal", "numeric" -> "NUMBER(" + (length.isBlank() ? "18,2" : length) + ")"; case "float", "double" -> "BINARY_DOUBLE"; case "char" -> "CHAR(" + (length.isBlank() ? "255" : length) + ")"; case "varchar" -> "VARCHAR2(" + (length.isBlank() ? "255" : length) + ")"; case "text", "tinytext", "mediumtext", "longtext", "json" -> "CLOB"; case "datetime", "timestamp" -> "TIMESTAMP"; case "date" -> "DATE"; case "time" -> "INTERVAL DAY TO SECOND"; case "boolean" -> "NUMBER(1)"; default -> throw new ApiException("Oracle 不支持字段类型：" + column.type()); };
+    }
+    private String standardSearchClause(List<String> columns, String target) { List<String> targets = target == null ? columns : List.of(target); return targets.stream().map(column -> "CAST(" + standardId(column) + " AS VARCHAR(4000)) LIKE ?").reduce((a,b) -> a + " OR " + b).orElseThrow(); }
+    private String standardId(String value) { if (value == null || !IDENTIFIER.matcher(value).matches()) throw new ApiException("标识符只能包含英文字母、数字、下划线或 $：" + value); return "\"" + value + "\""; }
+    private String standardTable(String schema, String table) { return standardId(schema) + "." + standardId(table); }
     private List<Map<String, Object>> damengDatabases(String sessionId) {
         String sql = "SELECT USERNAME FROM SYS.SYSUSERS WHERE ID > 0 ORDER BY USERNAME";
         try (Connection connection = connections.open(sessionId); Statement statement = connection.createStatement(); ResultSet rs = statement.executeQuery(sql)) {
@@ -336,13 +468,13 @@ public class MysqlAdminService {
         return safe;
     }
     private List<String> primaryKeys(String sessionId, String database, String table) {
-        try (Connection connection = dataConnection(sessionId, database); ResultSet rs = connection.getMetaData().getPrimaryKeys(database, null, table)) { List<String> keys = new ArrayList<>(); while (rs.next()) keys.add(rs.getString("COLUMN_NAME")); return keys; } catch (SQLException exception) { throw sqlError(exception); }
+        try (Connection connection = dataConnection(sessionId, database); ResultSet rs = connection.getMetaData().getPrimaryKeys(isSqlServer(sessionId) ? database : null, isStandard(sessionId) || isDameng(sessionId) ? database : null, table)) { List<String> keys = new ArrayList<>(); while (rs.next()) keys.add(rs.getString("COLUMN_NAME")); return keys; } catch (SQLException exception) { throw sqlError(exception); }
     }
-    private Connection dataConnection(String sessionId, String database) { return isSqlServer(sessionId) ? connections.openDatabase(sessionId, database) : isDameng(sessionId) ? connections.openSchema(sessionId, database) : connections.open(sessionId); }
-    private String qualifiedTable(String sessionId, String database, String table) { return isSqlServer(sessionId) ? sqlTable(table) : isDameng(sessionId) ? dmTable(database, table) : id(database) + "." + id(table); }
-    private String columnId(String sessionId, String column) { return isSqlServer(sessionId) ? sqlId(column) : isDameng(sessionId) ? dmId(column) : id(column); }
+    private Connection dataConnection(String sessionId, String database) { return isSqlServer(sessionId) ? connections.openDatabase(sessionId, database) : isDameng(sessionId) || isStandard(sessionId) ? connections.openSchema(sessionId, database) : connections.open(sessionId); }
+    private String qualifiedTable(String sessionId, String database, String table) { return isSqlServer(sessionId) ? sqlTable(table) : isDameng(sessionId) ? dmTable(database, table) : isStandard(sessionId) ? standardTable(database, table) : id(database) + "." + id(table); }
+    private String columnId(String sessionId, String column) { return isSqlServer(sessionId) ? sqlId(column) : isDameng(sessionId) ? dmId(column) : isStandard(sessionId) ? standardId(column) : id(column); }
     private String whereClause(String sessionId, java.util.Collection<String> columns) {
-        boolean sqlServer = isSqlServer(sessionId); return columns.stream().map(column -> sqlServer ? sqlId(column) + " = ?" : isDameng(sessionId) ? dmId(column) + " = ?" : id(column) + " <=> ?").reduce((a,b)->a+" AND "+b).orElseThrow();
+        boolean sqlServer = isSqlServer(sessionId); return columns.stream().map(column -> sqlServer ? sqlId(column) + " = ?" : isDameng(sessionId) ? dmId(column) + " = ?" : isStandard(sessionId) ? standardId(column) + " = ?" : id(column) + " <=> ?").reduce((a,b)->a+" AND "+b).orElseThrow();
     }
     private void bind(PreparedStatement statement, java.util.Collection<Object> values) throws SQLException { int position = 1; for (Object value : values) statement.setObject(position++, value); }
     private ApiException dataError(String operation, SQLException exception) { String message = exception.getMessage(); String normalized = message == null ? "" : message.toLowerCase(); if (normalized.contains("foreign key") || normalized.contains("reference constraint") || message.contains("FK_")) return new ApiException(operation + "：该记录仍被其他数据通过外键关联。请先处理关联记录后再重试。"); if (normalized.contains("duplicate") || normalized.contains("unique constraint")) return new ApiException(operation + "：字段值与已有记录重复，未满足唯一约束。请修改后重试。"); if (normalized.contains("cannot be null") || normalized.contains("doesn't have a default value") || normalized.contains("cannot insert the value null")) return new ApiException(operation + "：存在必填字段未填写。请补全非空字段后重试。"); if (normalized.contains("data truncation") || normalized.contains("too long") || normalized.contains("conversion failed")) return new ApiException(operation + "：字段值的长度或类型不符合表定义。请检查后重试。"); return new ApiException(operation + "：" + message, exception); }
@@ -373,7 +505,7 @@ public class MysqlAdminService {
     private String selectSql(String sessionId, String sql) {
         String normalized = sql == null ? "" : sql.trim();
         if (normalized.contains(";") || !normalized.matches("(?is)^(select|with)\\s+.+")) throw new ApiException("视图 SQL 只能是一条以 SELECT 或 WITH 开头的查询，且不能包含分号");
-        if (!isSqlServer(sessionId) && normalized.matches("(?is)^with\\s+.+") && !mysqlAtLeast(sessionId, 8, 0, 0)) return rewriteMysql57Cte(normalized);
+        if (connections.type(sessionId) == ConnectionService.DatabaseType.MYSQL && normalized.matches("(?is)^with\\s+.+") && !mysqlAtLeast(sessionId, 8, 0, 0)) return rewriteMysql57Cte(normalized);
         return normalized;
     }
     private String rewriteMysql57Cte(String sql) {
@@ -389,7 +521,7 @@ public class MysqlAdminService {
         return rewritten.toString();
     }
     private boolean mysqlAtLeast(String sessionId, int requiredMajor, int requiredMinor, int requiredPatch) {
-        if (isSqlServer(sessionId)) return true;
+        if (connections.type(sessionId) != ConnectionService.DatabaseType.MYSQL) return true;
         try (Connection connection = connections.open(sessionId)) {
             Matcher matcher = MYSQL_VERSION.matcher(connection.getMetaData().getDatabaseProductVersion());
             if (!matcher.find()) return false;
